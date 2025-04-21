@@ -20,6 +20,8 @@ For support all implemented clients:
 
 OnnxClient usage example
 ```
+from imb.onnx import OnnxClient
+
 onnx_client = OnnxClient(
     model_path='model.onnx',
     model_name='any name',
@@ -29,15 +31,19 @@ onnx_client = OnnxClient(
     fixed_batch=True,
     warmup=True
 )
+
 # if model has fixed input size (except batch size) then sample_inputs will be created
 sample_inputs = onnx_client.sample_inputs
 print('inputs shapes', [o.shape for o in sample_inputs])
+
 outputs = onnx_client(*sample_inputs)
 print('outputs shapes', [(o_name, o_value.shape) for o_name, o_value in outputs.items()])
 ```
 
 TritonClient usage example
 ```
+from imb.triton import TritonClient
+
 triton_client = TritonClient(
     url='localhost:8000',
     model_name='arcface',
@@ -52,9 +58,11 @@ triton_client = TritonClient(
     return_dict=True,
     warmup=False
 )
+
 # if model has fixed input size (except batch size) then sample_inputs will be created
 sample_inputs = triton_client.sample_inputs
 print('inputs shapes', [o.shape for o in sample_inputs])
+
 outputs = triton_client(*sample_inputs)
 print('outputs shapes', [(o_name, o_value.shape) for o_name, o_value in outputs.items()])
 ```
