@@ -1,4 +1,5 @@
 from setuptools import setup, find_packages
+from itertools import chain
 import os
 
 
@@ -11,9 +12,14 @@ def readme():
     with open('README.md', 'r') as f:
         return f.read()
 
+extras = ['triton', 'onnxcpu', 'onnxgpu']
+extras_require = {extra: req_file(f"requirements_{extra}.txt") for extra in extras}
+extras_require["all"] = list(chain(extras_require.values()))
+
+
 setup(
     name='imb',
-    version='1.0.0',
+    version='1.0.1',
     author='p-constant',
     author_email='nikshorop@gmail.com',
     description='Python library for run inference of deep learning models in different backends',
@@ -22,6 +28,7 @@ setup(
     url='https://github.com/TheConstant3/InferenceMultiBackend',
     packages=find_packages(),
     install_requires=req_file(),
+    extras_require=extras_require,
     classifiers=[
         "Programming Language :: Python :: 3.8",
         "License :: OSI Approved :: MIT License",
