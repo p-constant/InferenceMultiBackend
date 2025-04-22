@@ -12,6 +12,14 @@ import json
 import time
 
 
+class ShmHandlerWrapper:
+    def __init__(self, handler: Any, name: str, size: int):
+        self.handler = handler
+        self.name = name
+        self.size = size
+
+
+
 class TritonClient(BaseClient):
     def __init__(self, url: str,
                  model_name: str,
@@ -79,8 +87,10 @@ class TritonClient(BaseClient):
         if warmup:
             self.warmup_model()
 
-        self.input_shm_handles = [None for _ in range(len(self.inputs_names))]
-        self.output_shm_handles = [None for _ in range(len(self.outputs_names))]
+        self.input_shm_handlers: List[Optional[ShmHandlerWrapper]] = \
+            [None for _ in range(len(self.inputs_names))]
+        self.output_shm_handlers: List[Optional[ShmHandlerWrapper]] = \
+            [None for _ in range(len(self.outputs_names))]
 
         if self.use_cuda_shm or self.use_system_shm:
             assert is_async == False and fixed_batch == True
@@ -259,36 +269,7 @@ class TritonClient(BaseClient):
             old_regions = [name for name, _ in registrated_regions[:count_old_regions]]
         return old_regions
 
-    def _register_shm_regions(self):
-        """
-        Register shared memory regions in Triton
-        """
-        get_shared_memory_status = self.triton_client.get_cuda_shared_memory_status \
-            if self.use_cuda_shm else self.triton_client.get_system_shared_memory_status
-        
-        unregister_shared_memory = self.triton_client.unregister_cuda_shared_memory \
-            if self.use_cuda_shm else self.triton_client.unregister_system_shared_memory
-        
-        if self.scheme == "grpc":
-            regions_statuses = get_shared_memory_status(as_json=True)['regions']
-        else:
-            regions_statuses = get_shared_memory_status()
-
-        for shm_handle in self.input_shm_handles + self.output_shm_handles:
-            old_regions_names = self._get_old_regions_names(regions_statuses, shm_handle._triton_shm_name)
-            for old_region_name in old_regions_names:
-                unregister_shared_memory(old_region_name)
-            
-            if self.use_cuda_shm:
-                self.triton_client.register_cuda_shared_memory(
-                    shm_handle._triton_shm_name, cudashm.get_raw_handle(shm_handle), 0, shm_handle._byte_size
-                )
-            else:
-                self.triton_client.register_system_shared_memory(
-                    shm_handle._triton_shm_name, shm_handle._triton_shm_name, shm_handle._mpsm_handle.size
-                )
-
-    def _create_shm_handle(self, shape: List[int], dtype: np.dtype, name: str) -> Any:
+    def _create_shm_handle(self, shape: List[int], dtype: np.dtype, name: str) -> ShmHandlerWrapper:
         """
         Create shared memory handle
 
@@ -310,11 +291,11 @@ class TritonClient(BaseClient):
             shm_handle = shm.create_shared_memory_region(
                 shm_name, shm_name, byte_size
                 )
-        return shm_handle
+        return ShmHandlerWrapper(shm_handle, shm_name, byte_size)
 
     def _create_shm_handles_for_io(self, shapes: List[List[int]], 
                                         dtypes: List[np.dtype], 
-                                        names: List[str]) -> List[Any]:
+                                        names: List[str]) -> List[ShmHandlerWrapper]:
         """
         Create shared memory handles for inputs or outputs
 
@@ -324,7 +305,7 @@ class TritonClient(BaseClient):
             names (List[str]): Input/output names
 
         Returns:
-            List[Any]: shared memory handles
+            List[ShmHandlerWrapper]: shared memory handles
         """
         return [self._create_shm_handle(shape, dtype, name) 
                 for shape, dtype, name in zip(shapes, dtypes, names)]
@@ -333,15 +314,15 @@ class TritonClient(BaseClient):
         """
         Create shared memory handles for inputs and outputs
         """
-        self.input_shm_handles = self._create_shm_handles_for_io(
+        self.input_shm_handlers = self._create_shm_handles_for_io(
             self.inputs_shapes, self.np_inputs_dtypes, self.inputs_names
         )
-        self.output_shm_handles = self._create_shm_handles_for_io(
+        self.output_shm_handlers = self._create_shm_handles_for_io(
             self.outputs_shapes, self.np_outputs_dtypes, self.outputs_names
         )
 
     def _create_triton_input(self, input_data: np.ndarray, input_name: str, 
-                             config_input_format: str, shm_handle = None) -> Any:
+                             config_input_format: str, shm_handler: Optional[ShmHandlerWrapper] = None) -> Any:
         """
         Create triton InferInput
 
@@ -349,30 +330,28 @@ class TritonClient(BaseClient):
             input_data (np.ndarray): data for send to model
             input_name (str): name of input
             config_input_format (str): triton input format
-            shm_handle (_type_, optional): shared memory handle. Defaults to None.
+            shm_handler (ShmHandlerWrapper, optional): shared memory handler. Defaults to None.
 
         Returns:
             Any: triton InferInput for sending request
         """
         infer_input = self.client_module.InferInput(input_name, input_data.shape, config_input_format)
-        if self.use_cuda_shm:
-            cudashm.set_shared_memory_region(shm_handle, [input_data])
-            infer_input.set_shared_memory(shm_handle._triton_shm_name, shm_handle._byte_size)
-        elif self.use_system_shm:
-            shm.set_shared_memory_region(shm_handle, [input_data])
-            infer_input.set_shared_memory(shm_handle._triton_shm_name, shm_handle._mpsm_handle.size)
+        if self.use_cuda_shm or self.use_system_shm:
+            shm_utils = cudashm if self.use_cuda_shm else shm
+            shm_utils.set_shared_memory_region(shm_handler.handler, [input_data])
+            infer_input.set_shared_memory(shm_handler.name, shm_handler.size)
         else:
             infer_input.set_data_from_numpy(input_data)
         return infer_input
 
-    def _create_triton_output(self, output_name: str, binary: bool = True, shm_handle = None) -> Any:
+    def _create_triton_output(self, output_name: str, binary: bool = True, shm_handler: Optional[ShmHandlerWrapper] = None) -> Any:
         """
         Create triton InferRequestedOutput
 
         Args:
             output_name (str): output name
             binary (bool, optional): Whether the output is binary. Defaults to True.
-            shm_handle (_type_, optional): shared memory handle. Defaults to None.
+            shm_handler (ShmHandlerWrapper, optional): shared memory handler. Defaults to None.
 
         Returns:
             Any: triton InferRequestedOutput for receiving response
@@ -381,11 +360,38 @@ class TritonClient(BaseClient):
             infer_output = self.client_module.InferRequestedOutput(output_name)
         else:
             infer_output = self.client_module.InferRequestedOutput(output_name, binary_data=binary)
-        if self.use_cuda_shm:
-            infer_output.set_shared_memory(shm_handle._triton_shm_name, shm_handle._byte_size)
-        elif self.use_system_shm:
-            infer_output.set_shared_memory(shm_handle._triton_shm_name, shm_handle._mpsm_handle.size)
+        if self.use_cuda_shm or self.use_system_shm:
+            infer_output.set_shared_memory(shm_handler.name, shm_handler.size)
         return infer_output
+
+    def _register_shm_regions(self):
+        """
+        Register shared memory regions in Triton
+        """
+        get_shared_memory_status = self.triton_client.get_cuda_shared_memory_status \
+            if self.use_cuda_shm else self.triton_client.get_system_shared_memory_status
+        
+        unregister_shared_memory = self.triton_client.unregister_cuda_shared_memory \
+            if self.use_cuda_shm else self.triton_client.unregister_system_shared_memory
+        
+        if self.scheme == "grpc":
+            regions_statuses = get_shared_memory_status(as_json=True)['regions']
+        else:
+            regions_statuses = get_shared_memory_status()
+
+        for shm_handler in self.input_shm_handlers + self.output_shm_handlers:
+            old_regions_names = self._get_old_regions_names(regions_statuses, shm_handler.name)
+            for old_region_name in old_regions_names:
+                unregister_shared_memory(old_region_name)
+            
+            if self.use_cuda_shm:
+                self.triton_client.register_cuda_shared_memory(
+                    shm_handler.name, cudashm.get_raw_handle(shm_handler.handler), 0, shm_handler.size
+                )
+            else:
+                self.triton_client.register_system_shared_memory(
+                    shm_handler.name, shm_handler.name, shm_handler.size
+                )
 
     def _postprocess_triton_result(self, triton_response: Any, padding_size: int) -> Dict[str, np.ndarray]:
         """
@@ -399,7 +405,7 @@ class TritonClient(BaseClient):
             Dict[str, np.ndarray]: dict of output name and output data
         """
         result = dict()
-        for output_name, shm_op_handle in zip(self.outputs_names, self.output_shm_handles):
+        for output_name, shm_op_handle in zip(self.outputs_names, self.output_shm_handlers):
             if self.use_cuda_shm or self.use_system_shm:
                 if self.scheme == "grpc":
                     # output = triton_response.get_output(output_name, as_json=True) # WARN: bug in tritonclient library, return None
@@ -409,7 +415,7 @@ class TritonClient(BaseClient):
                     
                 shm_utils = shm if self.use_system_shm else cudashm
                 result[output_name] = shm_utils.get_contents_as_numpy(
-                    shm_op_handle,
+                    shm_op_handle.handler,
                     utils.triton_to_np_dtype(output["datatype"]),
                     output["shape"],
                 )
@@ -430,17 +436,17 @@ class TritonClient(BaseClient):
         
         for i_batch in range(count_batches):
             triton_inputs = []
-            for input_name, config_input_format, shm_ip_handle in \
-                    zip(self.inputs_names, self.triton_inputs_dtypes, self.input_shm_handles):
+            for input_name, config_input_format, shm_ip_handler in \
+                    zip(self.inputs_names, self.triton_inputs_dtypes, self.input_shm_handlers):
                 triton_input = self._create_triton_input(
-                    inputs_batches[input_name][i_batch], input_name, config_input_format, shm_ip_handle
+                    inputs_batches[input_name][i_batch], input_name, config_input_format, shm_ip_handler
                     )
                 triton_inputs.append(triton_input)
 
             triton_outputs = []
-            for output_name, shm_op_handle in zip(self.outputs_names, self.output_shm_handles):
+            for output_name, shm_op_handlers in zip(self.outputs_names, self.output_shm_handlers):
                 triton_output = self._create_triton_output(
-                    output_name, binary=True, shm_handle=shm_op_handle
+                    output_name, binary=True, shm_handler=shm_op_handlers
                     )
                 triton_outputs.append(triton_output)
 
@@ -468,14 +474,14 @@ class TritonClient(BaseClient):
         for i_batch in range(count_batches):
             triton_inputs = []
             for input_name, config_input_format, shm_ip_handle in \
-                    zip(self.inputs_names, self.triton_inputs_dtypes, self.input_shm_handles):
+                    zip(self.inputs_names, self.triton_inputs_dtypes, self.input_shm_handlers):
                 triton_input = self._create_triton_input(
                     inputs_batches[input_name][i_batch], input_name, config_input_format, shm_ip_handle
                     )
                 triton_inputs.append(triton_input)
 
             triton_outputs = []
-            for output_name, shm_op_handle in zip(self.outputs_names, self.output_shm_handles):
+            for output_name, shm_op_handle in zip(self.outputs_names, self.output_shm_handlers):
                 triton_output = self._create_triton_output(
                     output_name, binary=True, shm_handle=shm_op_handle
                     )
