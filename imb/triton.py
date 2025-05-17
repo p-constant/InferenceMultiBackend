@@ -25,8 +25,6 @@ class TritonClient(BaseClient):
                  model_name: str,
                  max_batch_size: int = 0,
                  sample_inputs: Optional[List[np.ndarray]] = None,
-                 timeout: int = 10,
-                 resend_count: int = 10,
                  fixed_batch: bool = True,
                  is_async: bool = False,
                  use_cuda_shm: bool = False,
@@ -43,8 +41,6 @@ class TritonClient(BaseClient):
             model_name (str): name of the model endpoint
             max_batch_size (int, optional): max batch size. Defaults to 0 (get value from triton config).
             sample_inputs (Optional[List[np.ndarray]], optional): samples for warmup. Defaults to None (zeros array).
-            timeout (int, optional): triton client timeout. Defaults to 10.
-            resend_count (int, optional): triton client resend count. Defaults to 10.
             fixed_batch (bool, optional): use fixed batch size, using padding for smaller batch. Defaults to True.
             is_async (bool, optional): async inference. Defaults to False.
             use_cuda_shm (bool, optional): use cuda shared memory. Defaults to False.
@@ -63,8 +59,6 @@ class TritonClient(BaseClient):
         self.is_async = is_async
         self.use_cuda_shm = use_cuda_shm
         self.use_system_shm = use_system_shm
-        self.triton_timeout = timeout
-        self.resend_count = resend_count
         self.max_shm_regions = max_shm_regions
         self.return_dict = return_dict
 
@@ -130,9 +124,7 @@ class TritonClient(BaseClient):
         self.triton_client = self.client_module.InferenceServerClient(
                                 url=self.url,
                                 verbose=False,
-                                ssl=False,
-                                network_timeout=self.triton_timeout,
-                                connection_timeout=self.triton_timeout
+                                ssl=False
                             )
 
     def _load_model_params(self, user_max_batch_size: int) -> None:

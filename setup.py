@@ -19,7 +19,7 @@ extras_require["all"] = list(chain(extras_require.values()))
 
 setup(
     name='imb',
-    version='1.0.2',
+    version='1.0.3',
     author='p-constant',
     author_email='nikshorop@gmail.com',
     description='Python library for run inference of deep learning models in different backends',
